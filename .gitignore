@@ -1,0 +1,8 @@
+# .gitignore
+# Python environment variables
+.env
+# Virtual environment files
+venv/
+# Node.js dependencies (adjust as needed)
+node_modules/
+```
