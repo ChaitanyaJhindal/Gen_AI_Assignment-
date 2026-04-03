@@ -2,6 +2,7 @@ import os
 import uuid
 
 import chromadb
+from pinecone import Pinecone
 
 from embeddings import (
   create_embeddings_for_pdf,
@@ -47,7 +48,22 @@ def build_client() -> chromadb.CloudClient:
   return chromadb.CloudClient(api_key=api_key, tenant=tenant, database=database)
 
 
+def build_pinecone_index(index_name: str):
+  api_key = os.getenv("PINECONE_API_KEY") or os.getenv("pinecone_API_key")
+  if not api_key:
+    raise ValueError(
+      "Missing Pinecone API key. Set PINECONE_API_KEY (or pinecone_API_key) in your environment/.env."
+    )
+
+  pc = Pinecone(api_key=api_key)
+  return pc.Index(index_name)
+
+
 def push_pdf_embeddings_to_chroma() -> None:
+  vector_db = (input("Choose vector DB (chroma/pinecone, default: chroma): ").strip().lower() or "chroma")
+  if vector_db not in {"chroma", "pinecone"}:
+    vector_db = "chroma"
+
   file_path = input("Enter Your PDF Path: ").strip()
   print("Choose model(s): 1=all-mpnet-base-v2, 2=all-MiniLM-L6-v2, 3=legal-bert")
   model_choice = input("Enter model number(s), comma-separated (default: 1,2,3): ")
@@ -68,10 +84,16 @@ def push_pdf_embeddings_to_chroma() -> None:
   )
   target_dimension = choose_target_dimension(dimension_input)
 
-  collection_name = (
-    input("Enter Chroma collection name (default: pdf_embeddings): ").strip()
-    or "pdf_embeddings"
-  )
+  if vector_db == "pinecone":
+    collection_name = (
+      input("Enter Pinecone index name (default: quickstart): ").strip()
+      or "quickstart"
+    )
+  else:
+    collection_name = (
+      input("Enter Chroma collection name (default: pdf_embeddings): ").strip()
+      or "pdf_embeddings"
+    )
 
   result = create_embeddings_for_pdf(
     file_path=file_path,
@@ -84,9 +106,6 @@ def push_pdf_embeddings_to_chroma() -> None:
   if not result["vectors"]:
     print("No vectors generated. Nothing to store.")
     return
-
-  client = build_client()
-  collection = client.get_or_create_collection(name=collection_name)
 
   ids = [f"{uuid.uuid4()}" for _ in result["vectors"]]
   metadatas = [
@@ -102,14 +121,33 @@ def push_pdf_embeddings_to_chroma() -> None:
     for idx in range(len(result["vectors"]))
   ]
 
-  collection.add(
-    ids=ids,
-    embeddings=result["vectors"],
-    documents=result["texts"],
-    metadatas=metadatas,
-  )
+  if vector_db == "pinecone":
+    index = build_pinecone_index(collection_name)
+    vectors = []
+    for idx in range(len(result["vectors"])):
+      metadata = {**metadatas[idx], "text": result["texts"][idx]}
+      vectors.append(
+        {
+          "id": ids[idx],
+          "values": result["vectors"][idx],
+          "metadata": metadata,
+        }
+      )
 
-  print(f"Stored {len(result['vectors'])} vectors in collection '{collection_name}'.")
+    batch_size = 100
+    for start in range(0, len(vectors), batch_size):
+      index.upsert(vectors=vectors[start : start + batch_size])
+  else:
+    client = build_client()
+    collection = client.get_or_create_collection(name=collection_name)
+    collection.add(
+      ids=ids,
+      embeddings=result["vectors"],
+      documents=result["texts"],
+      metadatas=metadatas,
+    )
+
+  print(f"Stored {len(result['vectors'])} vectors in {vector_db} '{collection_name}'.")
   print(f"Final embedding dimension: {result['final_dimension']}")
 
 

@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_huggingface import HuggingFaceEmbeddings
 from openai import OpenAI
+from pinecone import Pinecone
 from pydantic import BaseModel, Field
 
 from embeddings import AVAILABLE_MODELS, create_embeddings_for_pdf, detect_device
@@ -38,6 +39,7 @@ class IngestRequest(BaseModel):
 	max_vectors: int | None = None
 	target_dimension: int | None = None
 	chunking_strategy: str = "section-wise"
+	vector_db: str = "chroma"
 
 
 class QueryRequest(BaseModel):
@@ -46,6 +48,7 @@ class QueryRequest(BaseModel):
 	top_k: int = 4
 	llm_model_keys: list[str] = Field(default_factory=lambda: ["1", "2", "3"])
 	search_mode: str = "hybrid"
+	vector_db: str = "chroma"
 
 
 def load_dotenv_if_available() -> None:
@@ -83,6 +86,23 @@ def get_chroma_client() -> chromadb.CloudClient:
 	if not api_key:
 		raise HTTPException(status_code=500, detail="Missing CHROMA_API_KEY")
 	return chromadb.CloudClient(api_key=api_key, tenant=tenant, database=database)
+
+
+def get_pinecone_index(index_name: str | None = None):
+	api_key = os.getenv("PINECONE_API_KEY") or os.getenv("pinecone_API_key")
+	if not api_key:
+		raise HTTPException(status_code=500, detail="Missing PINECONE_API_KEY")
+
+	resolved_index_name = index_name or os.getenv("PINECONE_INDEX", "quickstart")
+	pc = Pinecone(api_key=api_key)
+	return pc.Index(resolved_index_name)
+
+
+def normalize_vector_db(value: str | None) -> str:
+	if not value:
+		return "chroma"
+	value = value.strip().lower()
+	return value if value in {"chroma", "pinecone"} else "chroma"
 
 
 def resolve_embedding_models(keys: list[str]) -> list[str]:
@@ -158,7 +178,7 @@ def keyword_score(query: str, document: str, metadata: dict | None = None) -> fl
 	return score
 
 
-def retrieve_context(collection, query: str, top_k: int, search_mode: str) -> tuple[str, list[dict]]:
+def retrieve_context_from_chroma(collection, query: str, top_k: int, search_mode: str) -> tuple[str, list[dict]]:
 	model_names, target_dimension = get_collection_embedding_settings(collection)
 	query_vector = embed_query(query, model_names, target_dimension)
 	vector_result = collection.query(
@@ -238,6 +258,60 @@ def retrieve_context(collection, query: str, top_k: int, search_mode: str) -> tu
 	return context, ranked_chunks
 
 
+def retrieve_context_from_pinecone(index, query: str, top_k: int, search_mode: str) -> tuple[str, list[dict]]:
+	model_names = list(EMBEDDING_MODEL_OPTIONS.values())
+	target_dimension = 1152
+	query_vector = embed_query(query, model_names, target_dimension)
+
+	query_result = index.query(
+		vector=query_vector,
+		top_k=max(top_k * 4, top_k),
+		include_metadata=True,
+	)
+
+	matches = getattr(query_result, "matches", None)
+	if matches is None and isinstance(query_result, dict):
+		matches = query_result.get("matches", [])
+	matches = matches or []
+
+	candidates: dict[str, dict] = {}
+	for match in matches:
+		metadata = match.get("metadata", {}) if isinstance(match, dict) else getattr(match, "metadata", {})
+		score = match.get("score", 0.0) if isinstance(match, dict) else getattr(match, "score", 0.0)
+		doc = metadata.get("text", "") if metadata else ""
+		if not doc:
+			continue
+
+		vector_score = max(float(score or 0.0), 0.0)
+		kw_score = keyword_score(query, doc, metadata)
+		hybrid_score = 0.7 * vector_score + 0.3 * kw_score
+		candidates[doc] = {
+			"text": doc,
+			"metadata": metadata,
+			"vector_score": vector_score,
+			"keyword_score": kw_score,
+			"hybrid_score": hybrid_score,
+		}
+
+	score_key = "hybrid_score" if search_mode == "hybrid" else "vector_score"
+	ranked_chunks = sorted(
+		candidates.values(),
+		key=lambda item: item[score_key],
+		reverse=True,
+	)[:top_k]
+
+	context = "\n\n".join(
+		(
+			f"Chunk {idx + 1} | Act: {chunk['metadata'].get('act', 'unknown')} | "
+			f"Section: {chunk['metadata'].get('section', 'unknown')} | "
+			f"Court: {chunk['metadata'].get('court', 'unknown')}\n"
+			f"{chunk['text']}"
+		)
+		for idx, chunk in enumerate(ranked_chunks)
+	)
+	return context, ranked_chunks
+
+
 def ask_with_models(
 	client: OpenAI,
 	query: str,
@@ -276,11 +350,13 @@ def model_options() -> dict:
 	return {
 		"llm_models": LLM_MODELS,
 		"embedding_models": EMBEDDING_MODEL_OPTIONS,
+		"vector_dbs": ["chroma", "pinecone"],
 	}
 
 
 @app.post("/ingest")
 def ingest_embeddings(payload: IngestRequest) -> dict:
+	vector_db = normalize_vector_db(payload.vector_db)
 	selected_embedding_models = resolve_embedding_models(payload.embedding_model_keys)
 
 	result = create_embeddings_for_pdf(
@@ -293,9 +369,6 @@ def ingest_embeddings(payload: IngestRequest) -> dict:
 
 	if not result["vectors"]:
 		raise HTTPException(status_code=400, detail="No vectors were generated from input document")
-
-	client = get_chroma_client()
-	collection = client.get_or_create_collection(name=payload.collection_name)
 
 	ids = [f"{uuid.uuid4()}" for _ in result["vectors"]]
 	metadatas = [
@@ -311,12 +384,31 @@ def ingest_embeddings(payload: IngestRequest) -> dict:
 		for idx in range(len(result["vectors"]))
 	]
 
-	collection.add(
-		ids=ids,
-		embeddings=result["vectors"],
-		documents=result["texts"],
-		metadatas=metadatas,
-	)
+	if vector_db == "pinecone":
+		index = get_pinecone_index(payload.collection_name)
+		vectors = []
+		for idx in range(len(result["vectors"])):
+			metadata = {**metadatas[idx], "text": result["texts"][idx]}
+			vectors.append(
+				{
+					"id": ids[idx],
+					"values": result["vectors"][idx],
+					"metadata": metadata,
+				}
+			)
+
+		batch_size = 100
+		for start in range(0, len(vectors), batch_size):
+			index.upsert(vectors=vectors[start : start + batch_size])
+	else:
+		client = get_chroma_client()
+		collection = client.get_or_create_collection(name=payload.collection_name)
+		collection.add(
+			ids=ids,
+			embeddings=result["vectors"],
+			documents=result["texts"],
+			metadatas=metadatas,
+		)
 
 	return {
 		"message": "Embeddings stored successfully",
@@ -325,26 +417,37 @@ def ingest_embeddings(payload: IngestRequest) -> dict:
 		"final_dimension": result["final_dimension"],
 		"models_used": result["model_names"],
 		"chunking_strategy": payload.chunking_strategy,
+		"vector_db": vector_db,
 	}
 
 
 @app.post("/query")
 def query_documents(payload: QueryRequest) -> dict:
+	vector_db = normalize_vector_db(payload.vector_db)
 	selected_llm_models = resolve_llm_models(payload.llm_model_keys)
 
-	chroma_client = get_chroma_client()
-	collection = chroma_client.get_or_create_collection(name=payload.collection_name)
-
-	context, ranked_chunks = retrieve_context(
-		collection,
-		payload.query,
-		payload.top_k,
-		payload.search_mode,
-	)
+	if vector_db == "pinecone":
+		index = get_pinecone_index(payload.collection_name)
+		context, ranked_chunks = retrieve_context_from_pinecone(
+			index,
+			payload.query,
+			payload.top_k,
+			payload.search_mode,
+		)
+	else:
+		chroma_client = get_chroma_client()
+		collection = chroma_client.get_or_create_collection(name=payload.collection_name)
+		context, ranked_chunks = retrieve_context_from_chroma(
+			collection,
+			payload.query,
+			payload.top_k,
+			payload.search_mode,
+		)
 	if not ranked_chunks:
 		return {
 			"query": payload.query,
 			"collection_name": payload.collection_name,
+			"vector_db": vector_db,
 			"retrieved_chunks": [],
 			"answers": {},
 			"message": "No matching documents found",
@@ -361,6 +464,7 @@ def query_documents(payload: QueryRequest) -> dict:
 	return {
 		"query": payload.query,
 		"collection_name": payload.collection_name,
+		"vector_db": vector_db,
 		"search_mode": payload.search_mode,
 		"retrieved_chunks": ranked_chunks,
 		"answers": answers,
