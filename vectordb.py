@@ -5,7 +5,7 @@ import chromadb
 from pinecone import Pinecone
 
 from embeddings import (
-  create_embeddings_for_pdf,
+  create_embeddings_for_legal_dataset,
   choose_models_from_input,
   choose_target_dimension,
   choose_vector_count,
@@ -60,11 +60,11 @@ def build_pinecone_index(index_name: str):
 
 
 def push_pdf_embeddings_to_chroma() -> None:
-  vector_db = (input("Choose vector DB (chroma/pinecone, default: chroma): ").strip().lower() or "chroma")
-  if vector_db not in {"chroma", "pinecone"}:
-    vector_db = "chroma"
+  vector_db = (input("Choose vector DB (chroma/pinecone/both, default: both): ").strip().lower() or "both")
+  if vector_db not in {"chroma", "pinecone", "both"}:
+    vector_db = "both"
 
-  file_path = input("Enter Your PDF Path: ").strip()
+  print("Using dataset source: lex_glue/eurlex")
   print("Choose model(s): 1=all-mpnet-base-v2, 2=all-MiniLM-L6-v2, 3=legal-bert")
   model_choice = input("Enter model number(s), comma-separated (default: 1,2,3): ")
   selected_models = choose_models_from_input(model_choice)
@@ -84,7 +84,12 @@ def push_pdf_embeddings_to_chroma() -> None:
   )
   target_dimension = choose_target_dimension(dimension_input)
 
-  if vector_db == "pinecone":
+  dataset_records_input = input(
+    "Enter max dataset records to ingest (default: all): "
+  )
+  max_dataset_records = choose_vector_count(dataset_records_input)
+
+  if vector_db in {"pinecone", "both"}:
     collection_name = (
       input("Enter Pinecone index name (default: quickstart): ").strip()
       or "quickstart"
@@ -95,12 +100,14 @@ def push_pdf_embeddings_to_chroma() -> None:
       or "pdf_embeddings"
     )
 
-  result = create_embeddings_for_pdf(
-    file_path=file_path,
+  result = create_embeddings_for_legal_dataset(
     model_names=selected_models,
     max_vectors=max_vectors,
     target_dimension=target_dimension,
     chunking_strategy=chunking_strategy,
+    dataset_name="lex_glue",
+    dataset_config="eurlex",
+    max_records=max_dataset_records,
   )
 
   if not result["vectors"]:
@@ -117,15 +124,19 @@ def push_pdf_embeddings_to_chroma() -> None:
       "act": result["chunk_metadatas"][idx]["act"],
       "section": result["chunk_metadatas"][idx]["section"],
       "court": result["chunk_metadatas"][idx]["court"],
+      "dataset": result["source_metadatas"][idx].get("dataset", "lex_glue/eurlex"),
+      "dataset_split": result["source_metadatas"][idx].get("dataset_split", "unknown"),
+      "dataset_record": result["source_metadatas"][idx].get("dataset_record", -1),
     }
     for idx in range(len(result["vectors"]))
   ]
 
-  if vector_db == "pinecone":
+  if vector_db in {"pinecone", "both"}:
     index = build_pinecone_index(collection_name)
     vectors = []
     for idx in range(len(result["vectors"])):
-      metadata = {**metadatas[idx], "text": result["texts"][idx]}
+      text_preview = result["texts"][idx][:3000]
+      metadata = {**metadatas[idx], "text": text_preview}
       vectors.append(
         {
           "id": ids[idx],
@@ -137,7 +148,8 @@ def push_pdf_embeddings_to_chroma() -> None:
     batch_size = 100
     for start in range(0, len(vectors), batch_size):
       index.upsert(vectors=vectors[start : start + batch_size])
-  else:
+
+  if vector_db in {"chroma", "both"}:
     client = build_client()
     collection = client.get_or_create_collection(name=collection_name)
     collection.add(

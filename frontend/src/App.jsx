@@ -2,15 +2,17 @@ import { useEffect, useMemo, useState } from 'react'
 
 function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState('http://127.0.0.1:8000')
-  const [collectionName, setCollectionName] = useState('legal_documents')
-  const [filePath, setFilePath] = useState('')
+  const [collectionName, setCollectionName] = useState('legal_knowledge_base')
   const [maxVectors, setMaxVectors] = useState('')
+  const [maxDatasetRecords, setMaxDatasetRecords] = useState('')
   const [targetDimension, setTargetDimension] = useState('')
   const [embedModelKeys, setEmbedModelKeys] = useState(['3'])
   const [chunkingStrategy, setChunkingStrategy] = useState('section-wise')
+  const [vectorDb, setVectorDb] = useState('both')
 
   const [query, setQuery] = useState('')
   const [topK, setTopK] = useState(4)
+  const [searchMode, setSearchMode] = useState('hybrid')
   const [llmModelKeys, setLlmModelKeys] = useState(['1', '2', '3'])
 
   const [ingestResult, setIngestResult] = useState(null)
@@ -59,12 +61,15 @@ function App() {
 
     try {
       const payload = {
-        file_path: filePath,
         collection_name: collectionName,
         embedding_model_keys: embedModelKeys,
         max_vectors: maxVectors ? Number(maxVectors) : null,
+        max_dataset_records: maxDatasetRecords ? Number(maxDatasetRecords) : null,
         target_dimension: targetDimension ? Number(targetDimension) : null,
         chunking_strategy: chunkingStrategy,
+        vector_db: vectorDb,
+        dataset_name: 'lex_glue',
+        dataset_config: 'eurlex',
       }
 
       const res = await fetch(`${endpoint}/ingest`, {
@@ -98,7 +103,8 @@ function App() {
         collection_name: collectionName,
         top_k: Number(topK),
         llm_model_keys: llmModelKeys,
-        search_mode: 'hybrid',
+        search_mode: searchMode,
+        vector_db: vectorDb,
       }
 
       const res = await fetch(`${endpoint}/query`, {
@@ -129,7 +135,7 @@ function App() {
         <p className="kicker">Legal RAG Console</p>
         <h1>Legal Document Assistant</h1>
         <p className="subtitle">
-          Section-wise legal ingestion, metadata-aware retrieval, and hybrid keyword plus vector search.
+          LexGLUE EURLEX knowledge base ingestion, hybrid retrieval, and strict legal-only guardrails.
         </p>
       </header>
 
@@ -147,25 +153,26 @@ function App() {
           id="collection"
           value={collectionName}
           onChange={(e) => setCollectionName(e.target.value)}
-          placeholder="pdf_embeddings"
+          placeholder="legal_knowledge_base"
         />
+
+        <label htmlFor="vector-db">Vector DB</label>
+        <select id="vector-db" value={vectorDb} onChange={(e) => setVectorDb(e.target.value)}>
+          {(availableModels.vector_dbs || ['both', 'chroma', 'pinecone']).map((db) => (
+            <option key={db} value={db}>
+              {db}
+            </option>
+          ))}
+        </select>
       </section>
 
       {error ? <div className="alert">{error}</div> : null}
 
       <section className="panel-grid">
         <form className="panel" onSubmit={ingestDocument}>
-          <h2>Ingest Document</h2>
-          <p className="panel-note">Load PDF, create embeddings, and store vectors to Chroma.</p>
-
-          <label htmlFor="pdf-path">PDF file path</label>
-          <input
-            id="pdf-path"
-            value={filePath}
-            onChange={(e) => setFilePath(e.target.value)}
-            placeholder="C:/docs/your-file.pdf"
-            required
-          />
+          <h2>Build Legal Knowledge Base</h2>
+          <p className="panel-note">Dataset source is fixed to lex_glue/eurlex.</p>
+          <p className="meta-pill">Knowledge Source: lex_glue / eurlex</p>
 
           <div className="inline-grid">
             <div>
@@ -176,6 +183,18 @@ function App() {
                 min="1"
                 value={maxVectors}
                 onChange={(e) => setMaxVectors(e.target.value)}
+                placeholder="All"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="max-records">Max dataset records</label>
+              <input
+                id="max-records"
+                type="number"
+                min="1"
+                value={maxDatasetRecords}
+                onChange={(e) => setMaxDatasetRecords(e.target.value)}
                 placeholder="All"
               />
             </div>
@@ -220,7 +239,7 @@ function App() {
           </div>
 
           <button className="cta" type="submit" disabled={isIngesting}>
-            {isIngesting ? 'Ingesting...' : 'Create and Store Embeddings'}
+            {isIngesting ? 'Building Knowledge Base...' : 'Ingest LexGLUE EURLEX'}
           </button>
 
           {ingestResult ? (
@@ -229,6 +248,8 @@ function App() {
               <p>Vectors stored: {ingestResult.vectors_stored}</p>
               <p>Final dimension: {ingestResult.final_dimension}</p>
               <p>Chunking: {ingestResult.chunking_strategy}</p>
+              <p>Vector DB: {ingestResult.vector_db}</p>
+              <p>Dataset: {ingestResult.dataset}</p>
             </div>
           ) : null}
         </form>
@@ -242,7 +263,7 @@ function App() {
             id="question"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ask a question grounded in your document"
+            placeholder="Ask a legal question grounded in LexGLUE EURLEX"
             rows={5}
             required
           />
@@ -255,6 +276,16 @@ function App() {
             value={topK}
             onChange={(e) => setTopK(e.target.value)}
           />
+
+          <label htmlFor="search-mode">Search mode</label>
+          <select
+            id="search-mode"
+            value={searchMode}
+            onChange={(e) => setSearchMode(e.target.value)}
+          >
+            <option value="hybrid">Hybrid (keyword + vector)</option>
+            <option value="vector">Vector only</option>
+          </select>
 
           <p className="chip-title">LLM models</p>
           <div className="chip-wrap">
@@ -273,6 +304,11 @@ function App() {
           <button className="cta" type="submit" disabled={isQuerying}>
             {isQuerying ? 'Searching and Asking...' : 'Run RAG Query'}
           </button>
+
+          {queryResult?.search_mode ? (
+            <p className="panel-note">Search mode used: {queryResult.search_mode}</p>
+          ) : null}
+          {queryResult?.message ? <p className="panel-note">{queryResult.message}</p> : null}
         </form>
       </section>
 
@@ -289,6 +325,7 @@ function App() {
                       <span className="meta-pill">Act: {chunk.metadata?.act || 'unknown'}</span>
                       <span className="meta-pill">Section: {chunk.metadata?.section || 'unknown'}</span>
                       <span className="meta-pill">Court: {chunk.metadata?.court || 'unknown'}</span>
+                      <span className="meta-pill">Split: {chunk.metadata?.dataset_split || 'unknown'}</span>
                     </div>
                     <p>{chunk.text}</p>
                   </div>

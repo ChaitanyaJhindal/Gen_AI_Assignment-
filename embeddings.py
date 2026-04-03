@@ -1,6 +1,8 @@
 import json
+import re
 
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 
 from document_ingestion import extract_legal_metadata, load_and_split_pdf
 
@@ -21,24 +23,27 @@ def detect_device() -> str:
         return "cpu"
 
 
-def create_embeddings_for_pdf(
-    file_path: str,
+def _create_embeddings_from_texts(
+    texts: list[str],
     model_names: list[str] | None = None,
     max_vectors: int | None = None,
     target_dimension: int | None = None,
     chunking_strategy: str = "generic",
+    source_metadatas: list[dict] | None = None,
 ) -> dict:
-    texts = load_and_split_pdf(file_path, chunking_strategy=chunking_strategy)
     chunk_metadatas = [extract_legal_metadata(text) for text in texts]
+    source_metadatas = source_metadatas or [{} for _ in texts]
 
     if max_vectors is not None and max_vectors > 0:
         texts = texts[:max_vectors]
         chunk_metadatas = chunk_metadatas[:max_vectors]
+        source_metadatas = source_metadatas[:max_vectors]
 
     if not texts:
         return {
             "texts": [],
             "chunk_metadatas": [],
+            "source_metadatas": [],
             "model_names": [],
             "dimensions": {},
             "combined_dimension": 0,
@@ -88,6 +93,7 @@ def create_embeddings_for_pdf(
     return {
         "texts": texts,
         "chunk_metadatas": chunk_metadatas,
+        "source_metadatas": source_metadatas,
         "chunking_strategy": chunking_strategy,
         "model_names": model_names,
         "dimensions": dimensions,
@@ -95,6 +101,116 @@ def create_embeddings_for_pdf(
         "final_dimension": final_dimension,
         "vectors": final_vectors,
     }
+
+
+def create_embeddings_for_pdf(
+    file_path: str,
+    model_names: list[str] | None = None,
+    max_vectors: int | None = None,
+    target_dimension: int | None = None,
+    chunking_strategy: str = "generic",
+) -> dict:
+    texts = load_and_split_pdf(file_path, chunking_strategy=chunking_strategy)
+    return _create_embeddings_from_texts(
+        texts=texts,
+        model_names=model_names,
+        max_vectors=max_vectors,
+        target_dimension=target_dimension,
+        chunking_strategy=chunking_strategy,
+    )
+
+
+def create_embeddings_for_legal_dataset(
+    model_names: list[str] | None = None,
+    max_vectors: int | None = None,
+    target_dimension: int | None = None,
+    chunking_strategy: str = "section-wise",
+    dataset_name: str = "lex_glue",
+    dataset_config: str = "eurlex",
+    max_records: int | None = None,
+) -> dict:
+    from datasets import load_dataset
+
+    dataset = load_dataset(dataset_name, dataset_config)
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        encoding_name="cl100k_base",
+        chunk_size=100,
+        chunk_overlap=0,
+        separators=[
+            "\nSection ",
+            "\nSECTION ",
+            "\nSec. ",
+            "\nArticle ",
+            "\nARTICLE ",
+            "\nArt. ",
+            "\nChapter ",
+            "\nCHAPTER ",
+            "\nClause ",
+            "\nCLAUSE ",
+            "\n\n",
+            "\n",
+            ". ",
+            " ",
+            "",
+        ],
+    )
+
+    texts: list[str] = []
+    source_metadatas: list[dict] = []
+
+    processed_records = 0
+    for split_name in dataset.keys():
+        split_rows = dataset[split_name]
+        for row_idx, row in enumerate(split_rows):
+            text_body = str(row.get("text", "") or "")
+            if not text_body.strip():
+                continue
+
+            # Encourage cleaner legal boundaries before token chunking.
+            text_body = re.sub(
+                r"(?im)^\s*(section|sec\.?|article|art\.?|chapter|clause)\s+",
+                r"\n\1 ",
+                text_body,
+            )
+
+            title = str(row.get("title", "") or "")
+            labels = row.get("labels", [])
+            labels_text = ",".join(str(label) for label in labels) if isinstance(labels, list) else str(labels)
+            record_text = (
+                f"Title: {title}\n\n{text_body}\n\nLegal Labels: {labels_text}"
+                if title
+                else f"{text_body}\n\nLegal Labels: {labels_text}"
+            )
+
+            chunks = splitter.split_text(record_text)
+            if not chunks:
+                chunks = [record_text]
+
+            for chunk in chunks:
+                texts.append(chunk)
+                source_metadatas.append(
+                    {
+                        "dataset": f"{dataset_name}/{dataset_config}",
+                        "dataset_split": split_name,
+                        "dataset_record": row_idx,
+                    }
+                )
+
+            processed_records += 1
+            if max_records is not None and max_records > 0 and processed_records >= max_records:
+                break
+
+        if max_records is not None and max_records > 0 and processed_records >= max_records:
+            break
+
+    return _create_embeddings_from_texts(
+        texts=texts,
+        model_names=model_names,
+        max_vectors=max_vectors,
+        target_dimension=target_dimension,
+        chunking_strategy=chunking_strategy,
+        source_metadatas=source_metadatas,
+    )
 
 
 def choose_models_from_input(raw_choice: str) -> list[str]:
