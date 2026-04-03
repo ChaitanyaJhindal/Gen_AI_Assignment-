@@ -49,9 +49,14 @@ def build_client() -> chromadb.CloudClient:
 
 def push_pdf_embeddings_to_chroma() -> None:
   file_path = input("Enter Your PDF Path: ").strip()
-  print("Choose model(s): 1=all-mpnet-base-v2, 2=all-MiniLM-L6-v2")
-  model_choice = input("Enter model number(s), comma-separated (default: 1,2): ")
+  print("Choose model(s): 1=all-mpnet-base-v2, 2=all-MiniLM-L6-v2, 3=legal-bert")
+  model_choice = input("Enter model number(s), comma-separated (default: 1,2,3): ")
   selected_models = choose_models_from_input(model_choice)
+
+  chunking_strategy = (
+    input("Choose chunking strategy (generic/section-wise, default: section-wise): ").strip()
+    or "section-wise"
+  )
 
   vector_count_input = input(
     "Enter number of vectors/chunks to generate (default: all): "
@@ -73,6 +78,7 @@ def push_pdf_embeddings_to_chroma() -> None:
     model_names=selected_models,
     max_vectors=max_vectors,
     target_dimension=target_dimension,
+    chunking_strategy=chunking_strategy,
   )
 
   if not result["vectors"]:
@@ -89,6 +95,9 @@ def push_pdf_embeddings_to_chroma() -> None:
       "combined_dimension": result["combined_dimension"],
       "final_dimension": result["final_dimension"],
       "models": ",".join(result["model_names"]),
+      "act": result["chunk_metadatas"][idx]["act"],
+      "section": result["chunk_metadatas"][idx]["section"],
+      "court": result["chunk_metadatas"][idx]["court"],
     }
     for idx in range(len(result["vectors"]))
   ]

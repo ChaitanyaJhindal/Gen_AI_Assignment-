@@ -2,12 +2,13 @@ import json
 
 from langchain_huggingface import HuggingFaceEmbeddings
 
-from document_ingestion import load_and_split_pdf
+from document_ingestion import extract_legal_metadata, load_and_split_pdf
 
 
 AVAILABLE_MODELS = {
     "1": "sentence-transformers/all-mpnet-base-v2",
     "2": "sentence-transformers/all-MiniLM-L6-v2",
+    "3": "nlpaueb/legal-bert-base-uncased",
 }
 
 
@@ -25,14 +26,19 @@ def create_embeddings_for_pdf(
     model_names: list[str] | None = None,
     max_vectors: int | None = None,
     target_dimension: int | None = None,
+    chunking_strategy: str = "generic",
 ) -> dict:
-    texts = load_and_split_pdf(file_path)
+    texts = load_and_split_pdf(file_path, chunking_strategy=chunking_strategy)
+    chunk_metadatas = [extract_legal_metadata(text) for text in texts]
+
     if max_vectors is not None and max_vectors > 0:
         texts = texts[:max_vectors]
+        chunk_metadatas = chunk_metadatas[:max_vectors]
 
     if not texts:
         return {
             "texts": [],
+            "chunk_metadatas": [],
             "model_names": [],
             "dimensions": {},
             "combined_dimension": 0,
@@ -81,6 +87,8 @@ def create_embeddings_for_pdf(
 
     return {
         "texts": texts,
+        "chunk_metadatas": chunk_metadatas,
+        "chunking_strategy": chunking_strategy,
         "model_names": model_names,
         "dimensions": dimensions,
         "combined_dimension": combined_dimension,
@@ -119,9 +127,14 @@ def choose_target_dimension(raw_value: str) -> int | None:
 
 if __name__ == "__main__":
     file_path = input("Enter Your PDF Path: ")
-    print("Choose model(s): 1=all-mpnet-base-v2, 2=all-MiniLM-L6-v2")
-    model_choice = input("Enter model number(s), comma-separated (default: 1,2): ")
+    print("Choose model(s): 1=all-mpnet-base-v2, 2=all-MiniLM-L6-v2, 3=legal-bert")
+    model_choice = input("Enter model number(s), comma-separated (default: 1,2,3): ")
     selected_models = choose_models_from_input(model_choice)
+
+    chunking_strategy = (
+        input("Choose chunking strategy (generic/section-wise, default: section-wise): ").strip()
+        or "section-wise"
+    )
 
     vector_count_input = input(
         "Enter number of vectors/chunks to generate (default: all): "
@@ -138,6 +151,7 @@ if __name__ == "__main__":
         model_names=selected_models,
         max_vectors=max_vectors,
         target_dimension=target_dimension,
+        chunking_strategy=chunking_strategy,
     )
     print(f"Total vectors created: {len(result['vectors'])}")
     print(f"Combined embedding dimension: {result['combined_dimension']}")

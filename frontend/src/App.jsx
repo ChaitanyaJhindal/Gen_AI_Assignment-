@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 
 function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState('http://127.0.0.1:8000')
-  const [collectionName, setCollectionName] = useState('pdf_embeddings')
+  const [collectionName, setCollectionName] = useState('legal_documents')
   const [filePath, setFilePath] = useState('')
   const [maxVectors, setMaxVectors] = useState('')
   const [targetDimension, setTargetDimension] = useState('')
-  const [embedModelKeys, setEmbedModelKeys] = useState(['1', '2'])
+  const [embedModelKeys, setEmbedModelKeys] = useState(['3'])
+  const [chunkingStrategy, setChunkingStrategy] = useState('section-wise')
 
   const [query, setQuery] = useState('')
   const [topK, setTopK] = useState(4)
@@ -63,6 +64,7 @@ function App() {
         embedding_model_keys: embedModelKeys,
         max_vectors: maxVectors ? Number(maxVectors) : null,
         target_dimension: targetDimension ? Number(targetDimension) : null,
+        chunking_strategy: chunkingStrategy,
       }
 
       const res = await fetch(`${endpoint}/ingest`, {
@@ -96,6 +98,7 @@ function App() {
         collection_name: collectionName,
         top_k: Number(topK),
         llm_model_keys: llmModelKeys,
+        search_mode: 'hybrid',
       }
 
       const res = await fetch(`${endpoint}/query`, {
@@ -123,10 +126,10 @@ function App() {
       <div className="bg-orb orb-b" aria-hidden="true" />
 
       <header className="hero-header">
-        <p className="kicker">RAG Control Room</p>
-        <h1>Document Intelligence Studio</h1>
+        <p className="kicker">Legal RAG Console</p>
+        <h1>Legal Document Assistant</h1>
         <p className="subtitle">
-          Ingest PDFs, search vectors, and compare multi-LLM answers in one live dashboard.
+          Section-wise legal ingestion, metadata-aware retrieval, and hybrid keyword plus vector search.
         </p>
       </header>
 
@@ -188,6 +191,18 @@ function App() {
                 placeholder="Original"
               />
             </div>
+
+            <div>
+              <label htmlFor="chunking">Chunking</label>
+              <select
+                id="chunking"
+                value={chunkingStrategy}
+                onChange={(e) => setChunkingStrategy(e.target.value)}
+              >
+                <option value="section-wise">Section-wise</option>
+                <option value="generic">Generic</option>
+              </select>
+            </div>
           </div>
 
           <p className="chip-title">Embedding models</p>
@@ -213,13 +228,14 @@ function App() {
               <p>{ingestResult.message}</p>
               <p>Vectors stored: {ingestResult.vectors_stored}</p>
               <p>Final dimension: {ingestResult.final_dimension}</p>
+              <p>Chunking: {ingestResult.chunking_strategy}</p>
             </div>
           ) : null}
         </form>
 
         <form className="panel" onSubmit={askQuery}>
           <h2>Query + Compare Models</h2>
-          <p className="panel-note">Retrieve relevant chunks and ask selected LLMs.</p>
+          <p className="panel-note">Hybrid search uses keyword + vector ranking before LLM answers.</p>
 
           <label htmlFor="question">Question</label>
           <textarea
@@ -267,9 +283,14 @@ function App() {
             <div className="chunk-list">
               {queryResult.retrieved_chunks?.length ? (
                 queryResult.retrieved_chunks.map((chunk, idx) => (
-                  <div className="chunk-card" key={`${idx}-${chunk.slice(0, 16)}`}>
+                  <div className="chunk-card" key={`${idx}-${(chunk.text || '').slice(0, 16)}`}>
                     <p className="chunk-index">Chunk {idx + 1}</p>
-                    <p>{chunk}</p>
+                    <div className="meta-row">
+                      <span className="meta-pill">Act: {chunk.metadata?.act || 'unknown'}</span>
+                      <span className="meta-pill">Section: {chunk.metadata?.section || 'unknown'}</span>
+                      <span className="meta-pill">Court: {chunk.metadata?.court || 'unknown'}</span>
+                    </div>
+                    <p>{chunk.text}</p>
                   </div>
                 ))
               ) : (
